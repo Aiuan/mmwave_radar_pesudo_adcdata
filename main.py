@@ -55,13 +55,15 @@ def main():
 
     nmp = NormalModeProcess(
         mode_infos,
-        pesudo_radar_adcdata.real, pesudo_radar_adcdata.imag,
-        apply_vmax_extend=False
+        pesudo_radar_adcdata.real,
+        pesudo_radar_adcdata.imag,
+        apply_vmax_extend=True
     )
 
     nmp.run(
-        generate_pcd=True, generate_heatmapBEV=True, generate_heatmap4D=False,
-        cfar_type='CAOS', calib_on=False, re_order_on=False
+        generate_pcd=True,
+        generate_heatmapBEV=True,
+        generate_heatmap4D=False
     )
 
     pcd_detect = nmp.get_pcd()

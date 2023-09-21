@@ -2,7 +2,7 @@ import time
 import numpy as np
 
 class NormalModeProcess(object):
-    def __init__(self, infos, data_real, data_imag, calib=None, apply_vmax_extend=True):
+    def __init__(self, infos, data_real, data_imag, apply_vmax_extend=False):
         self.infos = infos
 
         # data_real.shape[2]=data_imag.shape[2]=16: ordered by dev[0,1,2,3]_rx[0,1,2,3],
@@ -19,10 +19,12 @@ class NormalModeProcess(object):
 
         self.range_bins = np.arange(self.rangeFFT_size) * self.infos['range_res_m']
         self.doppler_bins = np.arange(-self.dopplerFFT_size/2, self.dopplerFFT_size/2) * self.infos['velocity_res_m_sec']
-        self.azimuth_bins = np.arange(-self.azimuthFFT_size, self.azimuthFFT_size, 2) * np.pi / self.azimuthFFT_size
-        self.elevation_bins = np.arange(-self.elevationFFT_size, self.elevationFFT_size, 2) * np.pi / self.elevationFFT_size
-
-        self.calib = calib
+        # self.azimuth_bins = np.arange(-self.azimuthFFT_size, self.azimuthFFT_size, 2) * np.pi / self.azimuthFFT_size
+        # self.azimuth_bins = np.arcsin(self.azimuth_bins / 2 / np.pi / self.doa_unitDis) / np.pi * 180
+        self.azimuth_bins = np.arcsin(np.arange(-1 / 2, 1 / 2, 1 / self.azimuthFFT_size) / self.doa_unitDis) / np.pi * 180
+        # self.elevation_bins = np.arange(-self.elevationFFT_size, self.elevationFFT_size, 2) * np.pi / self.elevationFFT_size
+        # self.elevation_bins = np.arcsin(self.elevation_bins / 2 / np.pi / self.doa_unitDis) / np.pi * 180
+        self.elevation_bins = np.arcsin(np.arange(-1 / 2, 1 / 2, 1 / self.elevationFFT_size) / self.doa_unitDis) / np.pi * 180
 
         self.num_rx = self.infos['numRXPerDevice'] * self.infos['numDevices']
         self.num_tx = self.infos['numTXPerDevice'] * self.infos['numDevices']
@@ -48,7 +50,7 @@ class NormalModeProcess(object):
 
         self.scale_factor = np.array([0.2500, 0.1250, 0.0625, 0.0312, 0.0156, 0.0078, 0.0039, 0.0020])
 
-        self.doa_fov_azim = [-80, 80]
+        self.doa_fov_azim = [-70, 70]
         self.doa_fov_elev = [-20, 20]
 
     def __timer__(self, fn):
@@ -57,7 +59,7 @@ class NormalModeProcess(object):
         end_time = time.time()
         print('{}() function consume: {:.3f} s'.format(fn.__name__, end_time - start_time))
 
-    def run(self, generate_pcd, generate_heatmapBEV, generate_heatmap4D, cfar_type='CAOS', calib_on=True, re_order_on=True):
+    def run(self, generate_pcd: bool, generate_heatmapBEV: bool, generate_heatmap4D: bool, cfar_type: str ='CAOS'):
         self.generate_pcd = generate_pcd
         self.generate_heatmapBEV = generate_heatmapBEV
         self.generate_heatmap4D = generate_heatmap4D
@@ -66,15 +68,6 @@ class NormalModeProcess(object):
         self.cfar_type = cfar_type
 
         if self.generate_pcd or self.generate_heatmapBEV or self.generate_heatmap4D:
-            if calib_on:
-                self.__timer__(self.__calibrate_rawdata__)
-            else:
-                self.data_calib = self.data_raw
-
-            if re_order_on:
-                self.__timer__(self.__re_order__)
-            else:
-                self.data_reordered = self.data_calib
 
             self.__timer__(self.__calculate_antenna_array__)
 
@@ -98,22 +91,23 @@ class NormalModeProcess(object):
                 self.__timer__(self.__generate_heatmap4D__)
 
     def get_range_bins(self):
+        # unit: m
         return self.range_bins
 
     def get_doppler_bins(self):
+        # unit: m/s
+        # approach is negative, distance is positive
         return self.doppler_bins
 
-    def get_est_azimuth_bins(self, unit_degree=True):
-        if unit_degree:
-            return np.arcsin(self.azimuth_bins / 2 / np.pi / self.doa_unitDis) / np.pi * 180
-        else:
-            return np.arcsin(self.azimuth_bins / 2 / np.pi / self.doa_unitDis)
+    def get_azimuth_bins(self):
+        # unit: degree
+        # left is negative, right is positive
+        return self.azimuth_bins
 
-    def get_est_elevation_bins(self, unit_degree=True):
-        if unit_degree:
-            return np.arcsin(self.elevation_bins / 2 / np.pi / self.doa_unitDis) / np.pi * 180
-        else:
-            return np.arcsin(self.elevation_bins / 2 / np.pi / self.doa_unitDis)
+    def get_elevation_bins(self):
+        # unit: degree
+        # down is negative, up is positive
+        return self.elevation_bins
 
     def get_pcd(self):
         return self.pcd
@@ -121,64 +115,8 @@ class NormalModeProcess(object):
     def get_heatmapBEV(self):
         return self.heatmapBEV
 
-    def get_heatmap4D(self, in_fov):
-        if in_fov and self.heatmap4D is not None:
-            mask_azim = np.logical_and(
-                self.heatmap4D['est_azimuth_bins'] >= self.doa_fov_azim[0],
-                self.heatmap4D['est_azimuth_bins'] <= self.doa_fov_azim[1],
-            )
-            mask_elev = np.logical_and(
-                self.heatmap4D['est_elevation_bins'] >= self.doa_fov_elev[0],
-                self.heatmap4D['est_elevation_bins'] <= self.doa_fov_elev[1],
-            )
-            heatmap4D_infov = {
-                'heatmap4D': self.heatmap4D['heatmap4D'][:, :, mask_azim, :][:, :, :, mask_elev],
-                'range_bins': self.heatmap4D['range_bins'],
-                'est_azimuth_bins': self.heatmap4D['est_azimuth_bins'][mask_azim],
-                'est_elevation_bins': self.heatmap4D['est_elevation_bins'][mask_elev]
-            }
-            return heatmap4D_infov
-        else:
-            return self.heatmap4D
-
-    def __calibrate_rawdata__(self):
-        adc_sample_rate = self.infos['digOutSampleRate_ksps'] * 1e3
-        chirp_slope = self.infos['freqSlopeConst_MHz_usec'] * 1e6 / 1e-6
-        num_sample = self.infos['numAdcSamples']
-        num_loop = self.infos['numLoops']
-
-        range_mat = self.calib['calibResult']['RangeMat']
-        fs_calib = self.calib['params']['Sampling_Rate_sps']
-        slope_calib = self.calib['params']['Slope_MHzperus'] * 1e6 / 1e-6
-        calibration_interp = 5
-        peak_val_mat = self.calib['calibResult']['PeakValMat']
-        phase_calib_only = 1
-
-        tx_id_ref = self.tx_id_transfer_order[0]
-
-        # construct the frequency compensation matrix
-        freq_calib = 2 * np.pi * (
-                (range_mat[self.tx_id_transfer_order, :] - range_mat[tx_id_ref, 0])
-                * fs_calib / adc_sample_rate * chirp_slope / slope_calib
-        ) / (num_sample * calibration_interp)
-        correction_vec = np.exp(
-            1j * np.arange(num_sample).reshape((-1, 1, 1)) * np.expand_dims(freq_calib.T, axis=0)
-        ).conj()
-        freq_correction_mat = np.expand_dims(correction_vec, axis=1)
-
-        # construct the phase compensation matrix
-        phase_calib = peak_val_mat[tx_id_ref, 0] / peak_val_mat[self.tx_id_transfer_order, :]
-        # remove amplitude calibration
-        if phase_calib_only == 1:
-            phase_calib = phase_calib / np.abs(phase_calib)
-        phase_correction_mat = np.expand_dims(np.expand_dims(phase_calib.T, axis=0), axis=0)
-
-        self.data_calib = self.data_raw * freq_correction_mat * phase_correction_mat
-
-    def __re_order__(self):
-        # data_reordered.shape[2]=16: ordered by self.rx_id_onboard
-        # data_reordered.shape[3]=12: ordered by self.tx_id_transfer_order
-        self.data_reordered = self.data_calib[:, :, self.rx_id_onboard, :]
+    def get_heatmap4D(self):
+        return self.heatmap4D
 
     def __calculate_antenna_array__(self):
         self.virtual_array_azimuth = np.tile(self.tx_position_azimuth[self.tx_id_transfer_order], (self.num_rx, 1)) + \
@@ -235,7 +173,7 @@ class NormalModeProcess(object):
         self.virtual_array_noredundant_row1 = self.virtual_array_noredundant[self.virtual_array_noredundant[:, 1] == 0]
 
     def __rangeFFT__(self, window_enable=True, scale_on=False):
-        self.data_rangeFFT = self.data_reordered
+        self.data_rangeFFT = self.data_raw
 
         # DC offset compensation
         self.data_rangeFFT = self.data_rangeFFT - self.data_rangeFFT.mean(axis=0)
@@ -251,7 +189,7 @@ class NormalModeProcess(object):
             scale_factor = self.scale_factor[int(np.log2(self.rangeFFT_size)-4)]
             self.data_rangeFFT *= scale_factor
 
-    def __dopplerFFT__(self, window_enable=True, scale_on=False, clutter_remove=False):
+    def __dopplerFFT__(self, window_enable=False, scale_on=False, clutter_remove=False):
         self.data_dopplerFFT = self.data_rangeFFT
 
         if window_enable:
@@ -469,7 +407,7 @@ class NormalModeProcess(object):
             if self.apply_vmax_extend:
                 doppler_index_unwrap = doppler_index.reshape((-1, 1)) + self.dopplerFFT_size * \
                                        (np.arange(self.num_tx).reshape((1, -1)) - self.num_tx / 2 + 1 * (doppler_obj <= 0).reshape((-1, 1)))
-                doppler_index_unwrap = doppler_index_unwrap.astype(np.int)
+                doppler_index_unwrap = doppler_index_unwrap.astype('int')
 
                 sig_bin_org = bin_val
 
@@ -699,8 +637,8 @@ class NormalModeProcess(object):
             spec_elev = abs(data_elevationFFT[peak_loc_azim[i], :])
             peak_val_elev, peak_loc_elev = self.__DOA_BF_PeakDet_loc__(spec_elev, sidelobeLevel_dB_elev)
             for j in range(len(peak_loc_elev)):
-                est_azimuth = np.arcsin(self.azimuth_bins[peak_loc_azim[i]] / 2 / np.pi / self.doa_unitDis) / np.pi * 180
-                est_elevation = np.arcsin(self.elevation_bins[peak_loc_elev[j]] / 2 / np.pi / self.doa_unitDis) / np.pi * 180
+                est_azimuth = self.azimuth_bins[peak_loc_azim[i]]
+                est_elevation = self.elevation_bins[peak_loc_elev[j]]
                 if self.doa_fov_azim[0] <= est_azimuth <= self.doa_fov_azim[1] and \
                         self.doa_fov_elev[0] <= est_elevation <= self.doa_fov_elev[1]:
                     n_obj += 1
@@ -843,8 +781,9 @@ class NormalModeProcess(object):
         )
         heatmapBEV_dynamic = np.hstack((heatmapBEV_dynamic, heatmapBEV_dynamic[:, 0:1]))
 
-        sine_theta = np.arange(1, -1-2/self.azimuthFFT_size, -2/self.azimuthFFT_size)
-        cos_theta = np.sqrt(1 - np.power(sine_theta, 2))
+        theta = np.hstack((self.azimuth_bins, -self.azimuth_bins[0]))
+        sine_theta = np.sin(theta / 180 * np.pi)
+        cos_theta = np.cos(theta / 180 * np.pi)
         x = np.matmul(
             self.range_bins.reshape((-1, 1)),
             sine_theta.reshape((1, -1))
@@ -884,29 +823,33 @@ class NormalModeProcess(object):
             [np.argwhere(self.tx_id_transfer_order == i_tx)[0][0] for i_tx in self.virtual_array_noredundant[:, 3]])
         sig_space[:, :, sig_space_index0, sig_space_index1] = sig[:, :, sig_index0, sig_index1]
 
-        sig_space_dynamic = sig_space[:, np.arange(self.dopplerFFT_size) != self.dopplerFFT_size // 2, :, :].sum(axis=1)
-        sig_space_dynamic_azimuthFFT = np.fft.fftshift(np.fft.fft(sig_space_dynamic, n=self.azimuthFFT_size, axis=1), axes=1)
-        sig_space_dynamic_elevationFFT = np.fft.fftshift(np.fft.fft(sig_space_dynamic_azimuthFFT, n=self.elevationFFT_size, axis=2), axes=2)
-
-        sig_space_static = sig_space[:, self.dopplerFFT_size // 2, :, :]
-        sig_space_static_azimuthFFT = np.fft.fftshift(np.fft.fft(sig_space_static, n=self.azimuthFFT_size, axis=1), axes=1)
-        sig_space_static_elevationFFT = np.fft.fftshift(np.fft.fft(sig_space_static_azimuthFFT, n=self.elevationFFT_size, axis=2), axes=2)
-
-        heatmap4D = np.stack(
-            (
-                np.abs(sig_space_dynamic_elevationFFT),
-                np.abs(sig_space_static_elevationFFT)
-            ),
-            axis=1
+        sig_space_azimuthFFT = np.fft.fftshift(np.fft.fft(sig_space, n=self.azimuthFFT_size, axis=2), axes=2)
+        # crop by fov
+        mask_azimuth = np.logical_and(
+            self.azimuth_bins >= self.doa_fov_azim[0],
+            self.azimuth_bins <= self.doa_fov_azim[1]
         )
+        sig_space_azimuthFFT_cropped = sig_space_azimuthFFT[:, :, mask_azimuth, :]
+
+        sig_space_elevationFFT = np.fft.fftshift(np.fft.fft(sig_space_azimuthFFT_cropped, n=self.elevationFFT_size, axis=3), axes=3)
+        # crop by fov
+        mask_elevation = np.logical_and(
+            self.elevation_bins >= self.doa_fov_elev[0],
+            self.elevation_bins <= self.doa_fov_elev[1]
+        )
+        sig_space_elevationFFT_cropped = sig_space_elevationFFT[:, :, :, mask_elevation]
+
+        heatmap4D = np.abs(sig_space_elevationFFT_cropped)
 
         range_bins = self.get_range_bins()
-        est_azimuth_bins = self.get_est_azimuth_bins()
-        est_elevation_bins = self.get_est_elevation_bins()
+        doppler_bins = self.get_doppler_bins()
+        azimuth_bins = self.get_azimuth_bins()[mask_azimuth]
+        elevation_bins = self.get_elevation_bins()[mask_elevation]
 
         self.heatmap4D = {
             'heatmap4D': heatmap4D,
             'range_bins': range_bins,
-            'est_azimuth_bins': est_azimuth_bins,
-            'est_elevation_bins': est_elevation_bins
+            'doppler_bins': doppler_bins,
+            'azimuth_bins': azimuth_bins,
+            'elevation_bins': elevation_bins
         }
