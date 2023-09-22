@@ -1,38 +1,22 @@
 import numpy as np
-def calculate_PCAP(pcd_gt, pcd_detect, confidence, sigma):
-    # pointcloud average precision
+import pandas as pd
 
-    n_detect = len(pcd_detect['x'])
-    n_gt = len(pcd_gt['x'])
-
-    xyz_gt = np.stack((pcd_gt['x'], pcd_gt['y'], pcd_gt['z'])).T
-    xyz = np.stack((pcd_detect['x'], pcd_detect['y'], pcd_detect['z'])).T
+def calculate_PCAP(all_gt, all_detect):
+    n_gt = all_gt.shape[0]
+    n_detect = all_detect.shape[0]
 
     # sort by confidence
-    index_sorted = np.argsort(confidence)[::-1]
-    xyz_sorted = xyz[index_sorted, :]
-
-    distance = np.sqrt(
-        np.sum(
-            np.power(
-                np.expand_dims(xyz_sorted, axis=1) - np.expand_dims(xyz_gt, axis=0), 2
-            ), axis=2
-        )
-    )
-
-    distance_min = np.min(distance, axis=1)
-    index_min = np.argmin(distance, axis=1)
-    is_neighbor = (distance_min <= sigma)
-    whos_neighbor = [index_min[i] if is_neighbor[i] else None for i in range(n_detect)]
+    all_detect_sorted = all_detect.sort_values('confidence', ascending=False)
 
     precision = []
     recall = []
     for i in range(n_detect):
-        p = is_neighbor[:i+1].sum() / (i+1)
+        p = all_detect_sorted['is_TP'].iloc[:i + 1].sum() / (i + 1)
         precision.append(p)
 
-        unique_gt = set(whos_neighbor[:i+1])
-        unique_gt.remove(None)
+        unique_gt = set(all_detect_sorted['whos_TP'].iloc[:i + 1].tolist())
+        if None in unique_gt:
+            unique_gt.remove(None)
         r = len(unique_gt) / n_gt
         recall.append(r)
     precision = np.array(precision)
@@ -40,7 +24,7 @@ def calculate_PCAP(pcd_gt, pcd_detect, confidence, sigma):
 
     precision_adjust = precision.copy()
     for i in range(n_detect - 1, 0, -1):
-        if precision_adjust[i] > precision_adjust[i-1]:
+        if precision_adjust[i] > precision_adjust[i - 1]:
             precision_adjust[i - 1] = precision_adjust[i]
     precision_adjust = np.hstack((precision_adjust[0], precision_adjust))
     recall_adjust = np.hstack(([0], recall))
@@ -49,7 +33,7 @@ def calculate_PCAP(pcd_gt, pcd_detect, confidence, sigma):
 
     import matplotlib.pyplot as plt
     plt.figure()
-    plt.plot(recall, precision, 'red')
+    plt.scatter(recall, precision, 10, 'red', '*')
     plt.plot(recall_adjust, precision_adjust, 'green')
     plt.title('sigma={:.2f}, pcap={:.6f}'.format(sigma, pcap))
     plt.grid('on')
@@ -61,27 +45,96 @@ def calculate_PCAP(pcd_gt, pcd_detect, confidence, sigma):
 
     return pcap
 
+def judge_single_frame(frame_id, points_gt, points_detect, sigma):
+    n_gt = points_gt.shape[0]
+    n_detect = points_detect.shape[0]
+
+    if n_gt > 0 and n_detect > 0:
+        xyz_gt = points_gt[:, :3]
+        xyz_detect = points_detect[:, :3]
+
+        distance = np.sqrt(
+            np.sum(
+                np.power(
+                    np.expand_dims(xyz_detect, axis=1) - np.expand_dims(xyz_gt, axis=0), 2
+                ), axis=2
+            )
+        )
+
+        distance_min = np.min(distance, axis=1)
+        index_min = np.argmin(distance, axis=1)
+        is_TP = (distance_min <= sigma)
+        whos_TP = ['gt_frame{}_point{}'.format(frame_id, index_min[i]) if is_TP[i] else None for i in range(n_detect)]
+
+        df_gt = pd.DataFrame({
+            'name': ['gt_frame{}_point{}'.format(frame_id, i) for i in range(n_gt)],
+            'frame_id': np.ones((n_gt,), dtype='int') * frame_id
+        })
+
+        df_detect = pd.DataFrame({
+            'name': ['detect_frame{}_point{}'.format(frame_id, i) for i in range(n_detect)],
+            'frame_id': np.ones((n_detect,), dtype='int') * frame_id,
+            'is_TP': is_TP,
+            'whos_TP': whos_TP,
+            'confidence': points_detect[:, 3]
+        })
+    elif n_gt == 0 and n_detect > 0:
+        df_gt = None
+        df_detect = pd.DataFrame({
+            'name': ['detect_frame{}_point{}'.format(frame_id, i) for i in range(n_detect)],
+            'frame_id': np.ones((n_detect,), dtype='int') * frame_id,
+            'is_TP': np.zeros((n_detect,), dtype='bool'),
+            'whos_TP': [None for _ in range(n_detect)],
+            'confidence': points_detect[:, 3]
+        })
+    elif n_gt > 0 and n_detect == 0:
+        df_gt = pd.DataFrame({
+            'name': ['gt_frame{}_point{}'.format(frame_id, i) for i in range(n_gt)],
+            'frame_id': np.ones((n_gt,), dtype='int') * frame_id
+        })
+        df_detect = None
+    else:
+        df_gt = None
+        df_detect = None
+
+    return df_gt, df_detect
+
 
 if __name__ == '__main__':
-    pcd_gt = {
-        'x': np.array([-4, -8, -5, -12, -7, 0, 12, 9, 11, 21, 13], dtype='float'),
-        'y': np.array([3, 6, 12, 16, 24, 30, 35, 40, 60, 72, 84], dtype='float'),
-        'z': np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype='float'),
-        'velocity': np.array([-10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10], dtype='float'),
-        'intensity': np.array([10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10], dtype='float')
-    }
+    import os
 
-    pcd_detect = {
-        'x': np.array([-8, -5, -12, -7, 0, 13, 11, 14, 25, 18], dtype='float'),
-        'y': np.array([6, 12, 16, 24, 30, 35, 40, 60, 72, 84], dtype='float'),
-        'z': np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype='float'),
-        'velocity': np.array([-8, -6, -4, -2, 0, 1, 2, 3, 4, 5], dtype='float'),
-        'intensity': np.array([10, 10, 10, 10, 10, 10, 10, 10, 10, 10], dtype='float'),
-    }
+    sigma = 1
+    root_data = '../data'
 
-    confidence = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype='float')
+    all_detect = None
+    all_gt = None
+    frame_folders = os.listdir(root_data)
+    frame_folders.sort()
+    for i, frame_folder in enumerate(frame_folders):
+        root_frame = os.path.join(root_data, frame_folder)
 
-    pcap = calculate_PCAP(pcd_gt, pcd_detect, confidence, sigma=0.1)
+        data = np.load(os.path.join(root_frame, 'data.npz'))
+        points_gt = data['points_gt']
+        points_detect = data['points_detect']
 
-    print('done')
+        df_gt, df_detect = judge_single_frame(frame_id=i, points_gt=points_gt, points_detect=points_detect, sigma=sigma)
+
+        if df_gt is not None:
+            if all_gt is None:
+                all_gt = df_gt
+            else:
+                all_gt = pd.concat([all_gt, df_gt])
+
+        if df_detect is not None:
+            if all_detect is None:
+                all_detect = df_detect
+            else:
+                all_detect = pd.concat([all_detect, df_detect])
+
+        print('process frame{}'.format(i))
+
+    pcap = calculate_PCAP(all_gt, all_detect)
+
+
+    print(pcap)
 
